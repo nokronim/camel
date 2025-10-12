@@ -101,7 +101,12 @@ class TerminalToolkit(BaseToolkit):
                 )
             try:
                 # APIClient is used for operations that need a timeout, like exec_start
-                self.docker_api_client = docker.APIClient(base_url='unix://var/run/docker.sock', timeout=self.timeout)
+                # Use from_env() to respect DOCKER_HOST environment variable
+                docker_host = os.environ.get('DOCKER_HOST')
+                if docker_host:
+                    self.docker_api_client = docker.APIClient(base_url=docker_host, timeout=self.timeout)
+                else:
+                    self.docker_api_client = docker.APIClient(base_url='unix://var/run/docker.sock', timeout=self.timeout)
                 # The standard client is for higher-level, convenient operations
                 self.docker_client = docker.from_env()
                 self.container = self.docker_client.containers.get(docker_container_name)
