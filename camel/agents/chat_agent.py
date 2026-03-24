@@ -3050,6 +3050,69 @@ class ChatAgent(BaseAgent):
                 # If we're still here, continue the loop
                 continue
 
+            # --- Parse error retry: check for <tool_call> in content that wasn't parsed ---
+            _content = ""
+            if response.output_messages:
+                _content = response.output_messages[0].content or ""
+            if not _content:
+                # Fallback: check raw response for content when output_messages is empty
+                try:
+                    _raw = response.response
+                    if hasattr(_raw, 'choices') and _raw.choices:
+                        _content = getattr(_raw.choices[0].message, 'content', '') or ""
+                except Exception:
+                    pass
+            _should_retry = False
+            if _content:
+                if "<tool_call>" in _content:
+                    import re as _re
+                    _tc_matches = _re.findall(r"<tool_call>\s*(.*?)\s*</tool_call>", _content, _re.DOTALL)
+                    # Get registered tool names
+                    _valid_tools = set()
+                    try:
+                        for _ts in self._get_full_tool_schemas():
+                            _tn = _ts.get("function", {}).get("name", "")
+                            if _tn: _valid_tools.add(_tn)
+                    except Exception:
+                        pass
+                    for _tc_text in _tc_matches:
+                        try:
+                            _parsed = json.loads(_tc_text.strip())
+                            # Check tool name validity
+                            _tool_name = _parsed.get("name", "")
+                            if _valid_tools and _tool_name not in _valid_tools:
+                                raise ValueError(f"Unknown tool '{_tool_name}'. Available: {', '.join(sorted(_valid_tools))}")
+                        except (json.JSONDecodeError, ValueError) as _e:
+                            logger.warning(f"Unparsed tool call with invalid JSON: {_e}")
+                            _error_msg = (
+                                f"JSON Parse Error: {_e}\n"
+                                f"Your tool call has invalid JSON. Please fix and retry.\n"
+                                f"Problematic content: {_tc_text[:300]}"
+                            )
+                            _err_id = f"parse_error_{iteration_count}"
+                            _assist = FunctionCallingMessage(
+                                role_name=self.role_name, role_type=self.role_type,
+                                meta_dict=None, content="",
+                                func_name="json_parse_error",
+                                args={"error": str(_e)},
+                                tool_call_id=_err_id,
+                            )
+                            _func = FunctionCallingMessage(
+                                role_name=self.role_name, role_type=self.role_type,
+                                meta_dict=None, content="",
+                                func_name="json_parse_error",
+                                result=_error_msg,
+                                tool_call_id=_err_id,
+                            )
+                            _ts = time.time_ns() / 1_000_000_000
+                            self.update_memory(_assist, OpenAIBackendRole.ASSISTANT, timestamp=_ts)
+                            self.update_memory(_func, OpenAIBackendRole.FUNCTION, timestamp=_ts + 1e-6)
+                            _should_retry = True
+                            break  # break out of for loop
+            if _should_retry:
+                continue  # continue the while True loop
+            # --- End parse error retry ---
+
             # No tool calls - check if we should terminate based on terminators
             if self.response_terminators:
                 # Check terminators to see if task is complete
@@ -3958,7 +4021,9 @@ class ChatAgent(BaseAgent):
             for tool_call in tool_calls:
                 tool_name = tool_call.function.name  # type: ignore[union-attr]
                 tool_call_id = tool_call.id
-                args = json.loads(tool_call.function.arguments)  # type: ignore[union-attr]
+                args = json.loads(tool_call.function.arguments)
+                if isinstance(args, str):
+                    args = {"command": args}  # bare string fallback  # type: ignore[union-attr]
                 extra_content = getattr(tool_call, 'extra_content', None)
 
                 tool_call_request = ToolCallRequest(

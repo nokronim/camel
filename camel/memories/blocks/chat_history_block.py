@@ -103,17 +103,47 @@ class ChatHistoryBlock(MemoryBlock):
             Input: [user_msg1, user_msg2, user_msg3, user_msg4, , user_msg5]
             Result: [user_msg3, user_msg4, , user_msg5]
             """
-            preserved_messages = record_dicts[
-                :start_index
-            ]  # Preserve system message (if exists)
+            # Preserve system message AND first user message (task instruction)
+            preserve_end = start_index
+            if (preserve_end < len(record_dicts) and 
+                record_dicts[preserve_end].get('role_at_backend') == 'user'):
+                preserve_end += 1
+            preserved_messages = record_dicts[:preserve_end]
             sliding_messages = record_dicts[
-                start_index:
+                preserve_end:
             ]  # Messages to be truncated
 
-            # Take last window_size messages (if exceeds limit)
-            truncated_messages = (
-                [] if window_size == 0 else sliding_messages[-window_size:]
-            )
+            # Dynamic token-budget window: add messages from most recent
+            # backwards until token budget is reached.
+            # Budget: 24K tokens (leaves ~8K for generation in 32K context)
+            TOKEN_BUDGET = 24000
+
+            # Estimate tokens for preserved messages
+            preserved_tokens = 0
+            for rec in preserved_messages:
+                msg = rec.get('message', {})
+                c = msg.get('content', '') or ''
+                preserved_tokens += len(str(c)) // 4 + 4  # +4 for message overhead
+
+            remaining_budget = TOKEN_BUDGET - preserved_tokens
+            truncated_messages = []
+
+            # Add messages from most recent backwards
+            for rec in reversed(sliding_messages):
+                msg = rec.get('message', {})
+                c = msg.get('content', '') or ''
+                tc = msg.get('tool_calls', '') or ''
+                est_tokens = len(str(c)) // 4 + len(str(tc)) // 4 + 4
+                if remaining_budget - est_tokens < 0 and truncated_messages:
+                    break  # would exceed budget, stop
+                remaining_budget -= est_tokens
+                truncated_messages.append(rec)
+
+            truncated_messages.reverse()  # restore chronological order
+
+            # Also respect window_size as upper cap if set
+            if window_size and len(truncated_messages) > window_size:
+                truncated_messages = truncated_messages[-window_size:]
 
             # Combine preserved messages with truncated window messages
             final_records = preserved_messages + truncated_messages
