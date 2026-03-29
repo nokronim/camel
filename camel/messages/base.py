@@ -604,9 +604,14 @@ class BaseMessage:
             OpenAIAssistantMessage: The converted :obj:`OpenAIAssistantMessage`
                 object.
         """
+        # Preserve reasoning_content as <think> tags in content
+        # to match training data format
+        content = self.content
+        if self.reasoning_content and "<think>" not in (content or ""):
+            content = f"<think>\n{self.reasoning_content}\n</think>\n{content or ''}"
         message_dict: Dict[str, Any] = {
             "role": "assistant",
-            "content": self.content,
+            "content": content,
         }
 
         # Check if meta_dict contains tool_calls
