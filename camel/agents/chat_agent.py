@@ -3013,18 +3013,9 @@ class ChatAgent(BaseAgent):
                 # Record the assistant message with ALL tool calls (internal +
                 # external)
                 response_content = ""
-                response_reasoning = None
                 if response.output_messages:
                     response_content = (
                         response.output_messages[0].content or ""
-                    )
-                    response_reasoning = getattr(
-                        response.output_messages[0], "reasoning_content", None
-                    )
-                # Preserve thinking in memory to match training format
-                if response_reasoning:
-                    response_content = (
-                        f"<think>\n{response_reasoning}\n</think>\n{response_content}"
                     )
                 self._record_assistant_tool_calls_from_requests(
                     tool_call_requests, content=response_content
@@ -3390,18 +3381,9 @@ class ChatAgent(BaseAgent):
                 # Record the assistant message with ALL tool calls (internal +
                 # external) BEFORE executing any tools.
                 response_content = ""
-                response_reasoning = None
                 if response.output_messages:
                     response_content = (
                         response.output_messages[0].content or ""
-                    )
-                    response_reasoning = getattr(
-                        response.output_messages[0], "reasoning_content", None
-                    )
-                # Preserve thinking in memory to match training format
-                if response_reasoning:
-                    response_content = (
-                        f"<think>\n{response_reasoning}\n</think>\n{response_content}"
                     )
                 self._record_assistant_tool_calls_from_requests(
                     tool_call_requests, content=response_content
