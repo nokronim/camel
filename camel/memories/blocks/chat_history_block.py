@@ -123,7 +123,7 @@ class ChatHistoryBlock(MemoryBlock):
             for rec in preserved_messages:
                 msg = rec.get('message', {})
                 c = msg.get('content', '') or ''
-                preserved_tokens += len(str(c)) // 4 + 4  # +4 for message overhead
+                preserved_tokens += len(str(c)) // 3 + 4  # +4 for message overhead
 
             remaining_budget = TOKEN_BUDGET - preserved_tokens
             truncated_messages = []
@@ -133,7 +133,7 @@ class ChatHistoryBlock(MemoryBlock):
                 msg = rec.get('message', {})
                 c = msg.get('content', '') or ''
                 tc = msg.get('tool_calls', '') or ''
-                est_tokens = len(str(c)) // 4 + len(str(tc)) // 4 + 4
+                est_tokens = len(str(c)) // 3 + len(str(tc)) // 3 + 4
                 if remaining_budget - est_tokens < 0 and truncated_messages:
                     break  # would exceed budget, stop
                 remaining_budget -= est_tokens
