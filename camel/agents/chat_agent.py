@@ -3996,11 +3996,20 @@ class ChatAgent(BaseAgent):
                 choice.message, "reasoning_content", None
             )
 
+            _raw_content = choice.message.content or ""
+            # Read full content with <think> from thread-local storage
+            try:
+                from areal.experimental.openai.client import _think_content_storage
+                _stored = getattr(_think_content_storage, 'last_content', None)
+                if _stored and '<think>' in _stored and '<think>' not in _raw_content:
+                    _raw_content = _stored
+            except Exception:
+                pass
             chat_message = BaseMessage(
                 role_name=self.role_name,
                 role_type=self.role_type,
                 meta_dict=meta_dict,
-                content=choice.message.content or "",
+                content=_raw_content,
                 parsed=getattr(choice.message, "parsed", None),
                 reasoning_content=reasoning_content,
             )

@@ -18,6 +18,26 @@ from camel.memories.records import ContextRecord, MemoryRecord
 from camel.storages.key_value_storages.base import BaseKeyValueStorage
 from camel.storages.key_value_storages.in_memory import InMemoryKeyValueStorage
 from camel.types import OpenAIBackendRole
+import os
+
+# Lazy-loaded tokenizer for precise token counting in dynamic window
+_tokenizer_cache = {}
+
+def _get_tokenizer():
+    if 'tok' not in _tokenizer_cache:
+        tok_path = os.getenv("AREAL_TOKENIZER_PATH", "Qwen/Qwen3-8B")
+        try:
+            from transformers import AutoTokenizer
+            _tokenizer_cache['tok'] = AutoTokenizer.from_pretrained(tok_path, trust_remote_code=True)
+        except Exception:
+            _tokenizer_cache['tok'] = None
+    return _tokenizer_cache['tok']
+
+def _count_tokens(text: str) -> int:
+    tok = _get_tokenizer()
+    if tok is not None:
+        return len(tok.encode(str(text)))
+    return len(str(text)) // 3 + 4  # fallback
 
 
 class ChatHistoryBlock(MemoryBlock):
@@ -123,17 +143,22 @@ class ChatHistoryBlock(MemoryBlock):
             for rec in preserved_messages:
                 msg = rec.get('message', {})
                 c = msg.get('content', '') or ''
-                preserved_tokens += len(str(c)) // 3 + 4  # +4 for message overhead
+                preserved_tokens += _count_tokens(c) + 10  # +10 for role/template overhead
 
             remaining_budget = TOKEN_BUDGET - preserved_tokens
             truncated_messages = []
+            _tok_loaded = _get_tokenizer() is not None
+            if not hasattr(_get_tokenizer, '_logged'):
+                import logging
+                logging.getLogger(__name__).warning(f"TOKEN_WINDOW: tokenizer={'precise' if _tok_loaded else 'fallback(len//3)'}, budget={TOKEN_BUDGET}, preserved={preserved_tokens}")
+                _get_tokenizer._logged = True
 
             # Add messages from most recent backwards
             for rec in reversed(sliding_messages):
                 msg = rec.get('message', {})
                 c = msg.get('content', '') or ''
                 tc = msg.get('tool_calls', '') or ''
-                est_tokens = len(str(c)) // 3 + len(str(tc)) // 3 + 4
+                est_tokens = _count_tokens(c) + _count_tokens(str(tc)) + 10
                 if remaining_budget - est_tokens < 0 and truncated_messages:
                     break  # would exceed budget, stop
                 remaining_budget -= est_tokens
