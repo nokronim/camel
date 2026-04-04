@@ -97,12 +97,14 @@ class MoonshotModel(InterleavedThinkingMixin, OpenAICompatibleModel):
             model_config_dict = MoonshotConfig().as_dict()
         api_key = api_key or os.environ.get("MOONSHOT_API_KEY")
         # Preserve default URL if not provided
-        if url is None:
+        if not url:
             url = (
                 os.environ.get("MOONSHOT_API_BASE_URL")
                 or "https://api.moonshot.ai/v1"
             )
         timeout = timeout or float(os.environ.get("MODEL_TIMEOUT", 180))
+        # Track reasoning_content for each assistant turn (Kimi requires it back)
+        self._reasoning_history: list = []
         super().__init__(
             model_type=model_type,
             model_config_dict=model_config_dict,
@@ -240,39 +242,49 @@ class MoonshotModel(InterleavedThinkingMixin, OpenAICompatibleModel):
         return cleaned_tools
 
     @observe()
+    def _inject_reasoning(self, messages: List[OpenAIMessage]) -> List[OpenAIMessage]:
+        """Inject stored reasoning_content into assistant messages."""
+        processed = []
+        rc_idx = 0
+        for msg in messages:
+            if isinstance(msg, dict) and msg.get("role") == "assistant":
+                new_msg = dict(msg)
+                if "reasoning_content" not in new_msg:
+                    if rc_idx < len(self._reasoning_history):
+                        new_msg["reasoning_content"] = self._reasoning_history[rc_idx]
+                    else:
+                        new_msg["reasoning_content"] = ""
+                rc_idx += 1
+                processed.append(new_msg)
+            else:
+                if isinstance(msg, dict) and msg.get("role") == "assistant":
+                    rc_idx += 1
+                processed.append(msg)
+        return processed
+
+    def _extract_reasoning(self, response: ChatCompletion) -> None:
+        """Extract and store reasoning_content from response."""
+        if isinstance(response, ChatCompletion) and response.choices:
+            rc = getattr(response.choices[0].message, "reasoning_content", None)
+            self._reasoning_history.append(rc or "")
+
     def _run(
         self,
         messages: List[OpenAIMessage],
         response_format: Optional[Type[BaseModel]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Union[ChatCompletion, Stream[ChatCompletionChunk]]:
-        r"""Runs inference of Moonshot chat completion.
-
-        Args:
-            messages (List[OpenAIMessage]): Message list with the chat history
-                in OpenAI API format.
-            response_format (Optional[Type[BaseModel]]): The format of the
-                response.
-            tools (Optional[List[Dict[str, Any]]]): The schema of the tools to
-                use for the request.
-
-        Returns:
-            Union[ChatCompletion, Stream[ChatCompletionChunk]]:
-                `ChatCompletion` in the non-stream mode, or
-                `Stream[ChatCompletionChunk]` in the stream mode.
-        """
         self._log_and_trace()
-
-        request_config = self._prepare_request(
-            messages, response_format, tools
-        )
-
-        return self._call_client(
+        request_config = self._prepare_request(messages, response_format, tools)
+        processed_messages = self._inject_reasoning(messages)
+        response = self._call_client(
             self._client.chat.completions.create,
-            messages=messages,
+            messages=processed_messages,
             model=self.model_type,
             **request_config,
         )
+        self._extract_reasoning(response)
+        return response
 
     @observe()
     async def _arun(
@@ -281,31 +293,14 @@ class MoonshotModel(InterleavedThinkingMixin, OpenAICompatibleModel):
         response_format: Optional[Type[BaseModel]] = None,
         tools: Optional[List[Dict[str, Any]]] = None,
     ) -> Union[ChatCompletion, AsyncStream[ChatCompletionChunk]]:
-        r"""Runs inference of Moonshot chat completion asynchronously.
-
-        Args:
-            messages (List[OpenAIMessage]): Message list with the chat history
-                in OpenAI API format.
-            response_format (Optional[Type[BaseModel]]): The format of the
-                response.
-            tools (Optional[List[Dict[str, Any]]]): The schema of the tools to
-                use for the request.
-
-        Returns:
-            Union[ChatCompletion, AsyncStream[ChatCompletionChunk]]:
-                `ChatCompletion` in the non-stream mode, or
-                `AsyncStream[ChatCompletionChunk]` in the stream mode.
-        """
-
         self._log_and_trace()
-
-        request_config = self._prepare_request(
-            messages, response_format, tools
-        )
-
-        return await self._acall_client(
+        request_config = self._prepare_request(messages, response_format, tools)
+        processed_messages = self._inject_reasoning(messages)
+        response = await self._acall_client(
             self._async_client.chat.completions.create,
-            messages=messages,
+            messages=processed_messages,
             model=self.model_type,
             **request_config,
         )
+        self._extract_reasoning(response)
+        return response
