@@ -369,6 +369,24 @@ class OpenAICompatibleModel(BaseModelBackend):
     ) -> Union[ChatCompletion, AsyncStream[ChatCompletionChunk]]:
         request_config = self._prepare_request_config(tools)
 
+        # DEBUG: log what's actually being sent
+        import sys, json
+        _tools_in_cfg = request_config.get("tools")
+        sys.stderr.write(
+            f"[CAMEL_DEBUG _arequest_chat_completion] "
+            f"messages_count={len(messages)} "
+            f"tools_param={'present('+str(len(tools))+')' if tools else 'None'} "
+            f"tools_in_request_config={'present('+str(len(_tools_in_cfg))+')' if _tools_in_cfg else 'MISSING'} "
+            f"request_config_keys={list(request_config.keys())}\n"
+        )
+        if _tools_in_cfg:
+            try:
+                sys.stderr.write(f"[CAMEL_DEBUG] first_tool_schema: {json.dumps(_tools_in_cfg[0], indent=2)[:500]}\n")
+                sys.stderr.write(f"[CAMEL_DEBUG] tool_names: {[t.get('function',{}).get('name') for t in _tools_in_cfg]}\n")
+            except Exception as e:
+                sys.stderr.write(f"[CAMEL_DEBUG] tool_dump_err: {e}\n")
+        sys.stderr.flush()
+
         return await self._acall_client(
             self._async_client.chat.completions.create,
             messages=messages,

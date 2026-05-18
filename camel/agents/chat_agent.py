@@ -1632,7 +1632,87 @@ class ChatAgent(BaseAgent):
             else time.time_ns() / 1_000_000_000,  # Nanosecond precision
             agent_id=self.agent_id,
         )
+        if role == OpenAIBackendRole.ASSISTANT:
+            _c = message.content or ""
         self.memory.write_record(record)
+
+        # CAMEL_DUMP_MEMORY=1: dump the entire memory store after every
+        # update so we can verify <think> preservation at the memory layer
+        # (not just the outgoing prompt). One JSON file per memory mutation,
+        # written under $CAMEL_LOG_DIR/memory_dumps/.
+        if os.environ.get("CAMEL_DUMP_MEMORY", "0") == "1":
+            try:
+                import json as _json
+                _log_dir = os.environ.get("CAMEL_LOG_DIR", "/tmp")
+                _dump_dir = os.path.join(
+                    _log_dir, "memory_dumps", str(self.agent_id)
+                )
+                os.makedirs(_dump_dir, exist_ok=True)
+                _records = self.memory.retrieve()
+                _dumped = []
+                _asst_total = 0
+                _asst_with_think = 0
+                _parse_err = 0
+                for _ctx in _records:
+                    _mr = _ctx.memory_record
+                    _msg = _mr.message
+                    _content = getattr(_msg, "content", None)
+                    _rc = getattr(_msg, "reasoning_content", None)
+                    _role = str(_mr.role_at_backend)
+                    _has_think = isinstance(_content, str) and (
+                        "<think>" in _content
+                    )
+                    _is_parse_err = False
+                    try:
+                        _func_name = getattr(_msg, "func_name", None)
+                        if _func_name == "json_parse_error":
+                            _is_parse_err = True
+                    except Exception:
+                        pass
+                    if "ASSISTANT" in _role:
+                        _asst_total += 1
+                        if _has_think:
+                            _asst_with_think += 1
+                        if _is_parse_err:
+                            _parse_err += 1
+                    _dumped.append({
+                        "role": _role,
+                        "agent_id": _mr.agent_id,
+                        "content_len": len(_content) if isinstance(_content, str) else None,
+                        "content_has_think": bool(_has_think),
+                        "reasoning_len": len(_rc) if isinstance(_rc, str) else 0,
+                        "is_parse_err_placeholder": _is_parse_err,
+                        "content_preview": (
+                            (_content[:200] + "...") if isinstance(_content, str) and len(_content) > 200 else _content
+                        ),
+                    })
+                _real_asst = _asst_total - _parse_err
+                _verdict = "OK" if _real_asst == _asst_with_think else "MISSING"
+                _summary = {
+                    "trigger_role": str(role),
+                    "n_records": len(_records),
+                    "asst_total": _asst_total,
+                    "asst_with_think": _asst_with_think,
+                    "parse_err_placeholders": _parse_err,
+                    "real_asst_with_think_verdict": _verdict,
+                    "records": _dumped,
+                }
+                # Filename includes monotonically increasing turn index so
+                # files sort by time of mutation.
+                _turn_idx = getattr(self, "_camel_dump_memory_idx", 0) + 1
+                self._camel_dump_memory_idx = _turn_idx
+                _fname = os.path.join(_dump_dir, f"memory_{_turn_idx:05d}.json")
+                with open(_fname, "w") as _fh:
+                    _json.dump(_summary, _fh, indent=2)
+                print(
+                    f"[CAMEL_DUMP_MEMORY] turn={_turn_idx} trigger={role} "
+                    f"asst_total={_asst_total} asst_with_think={_asst_with_think} "
+                    f"parse_err={_parse_err} verdict={_verdict} "
+                    f"path={_fname}",
+                    flush=True,
+                )
+            except Exception as _e:
+                print(f"[CAMEL_DUMP_MEMORY] error: {_e}", flush=True)
 
         if return_records:
             return [record]
@@ -3016,12 +3096,18 @@ class ChatAgent(BaseAgent):
                 # Record the assistant message with ALL tool calls (internal +
                 # external)
                 response_content = ""
+                response_reasoning = None
                 if response.output_messages:
                     response_content = (
                         response.output_messages[0].content or ""
                     )
+                    response_reasoning = getattr(
+                        response.output_messages[0], "reasoning_content", None
+                    )
                 self._record_assistant_tool_calls_from_requests(
-                    tool_call_requests, content=response_content
+                    tool_call_requests,
+                    content=response_content,
+                    reasoning_content=response_reasoning,
                 )
                 recorded_tool_calls = True
 
@@ -3321,12 +3407,18 @@ class ChatAgent(BaseAgent):
                 # Record the assistant message with ALL tool calls (internal +
                 # external) BEFORE executing any tools.
                 response_content = ""
+                response_reasoning = None
                 if response.output_messages:
                     response_content = (
                         response.output_messages[0].content or ""
                     )
+                    response_reasoning = getattr(
+                        response.output_messages[0], "reasoning_content", None
+                    )
                 self._record_assistant_tool_calls_from_requests(
-                    tool_call_requests, content=response_content
+                    tool_call_requests,
+                    content=response_content,
+                    reasoning_content=response_reasoning,
                 )
                 recorded_tool_calls = True
 
@@ -3936,11 +4028,22 @@ class ChatAgent(BaseAgent):
                 choice.message, "reasoning_content", None
             )
 
+            _raw_content = choice.message.content or ""
+            # CAMEL_KEEP_THINK_IN_MEMORY=1: inline reasoning as <think>...</think>
+            # into content so it survives to_dict() and is fed back next turn.
+            if (
+                reasoning_content
+                and os.environ.get("CAMEL_KEEP_THINK_IN_MEMORY", "0") == "1"
+                and "<think>" not in _raw_content
+            ):
+                _raw_content = (
+                    f"<think>\n{reasoning_content}\n</think>\n\n{_raw_content}"
+                )
             chat_message = BaseMessage(
                 role_name=self.role_name,
                 role_type=self.role_type,
                 meta_dict=meta_dict,
-                content=choice.message.content or "",
+                content=_raw_content,
                 parsed=getattr(choice.message, "parsed", None),
                 reasoning_content=reasoning_content,
             )
@@ -5669,7 +5772,10 @@ class ChatAgent(BaseAgent):
         self.update_memory(assist_msg, OpenAIBackendRole.ASSISTANT)
 
     def _record_assistant_tool_calls_from_requests(
-        self, tool_call_requests: List["ToolCallRequest"], content: str = ""
+        self,
+        tool_call_requests: List["ToolCallRequest"],
+        content: str = "",
+        reasoning_content: Optional[str] = None,
     ) -> None:
         r"""Record assistant message with tool calls from requests.
 
@@ -5681,8 +5787,21 @@ class ChatAgent(BaseAgent):
         Args:
             tool_call_requests: List of tool call requests from model response.
             content: Optional content to include in the assistant message.
+            reasoning_content: Optional reasoning trace; when
+                CAMEL_KEEP_THINK_IN_MEMORY=1, inlined as <think>...</think>
+                into content so it survives to_dict() and is fed back next
+                turn.
         """
         import json
+
+        if (
+            reasoning_content
+            and os.environ.get("CAMEL_KEEP_THINK_IN_MEMORY", "0") == "1"
+            and "<think>" not in (content or "")
+        ):
+            content = (
+                f"<think>\n{reasoning_content}\n</think>\n\n{content or ''}"
+            )
 
         tool_calls_list = []
         for request in tool_call_requests:

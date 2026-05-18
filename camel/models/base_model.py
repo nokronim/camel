@@ -508,6 +508,12 @@ class BaseModelBackend(ABC, metaclass=ModelBackendMeta):
 
         from camel.models._utils import extract_thinking_from_content
 
+        # CAMEL_KEEP_THINK_IN_MEMORY=1 keeps past <think> blocks in the prompt
+        # sent to the model (feeds reasoning back into next-turn context).
+        _keep_think = (
+            os.environ.get("CAMEL_KEEP_THINK_IN_MEMORY", "0") == "1"
+        )
+
         for msg in messages:
             # Remove thinking content if needed
             role = msg.get('role')
@@ -516,6 +522,7 @@ class BaseModelBackend(ABC, metaclass=ModelBackendMeta):
                 self._extract_thinking_from_response
                 and role in ['assistant', 'user']
                 and isinstance(content, str)
+                and not _keep_think
             ):
                 content, _ = extract_thinking_from_content(content)
                 processed_msg = dict(msg)
